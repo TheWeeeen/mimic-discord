@@ -105,6 +105,16 @@ pub struct SpooferConfig {
     /// Farm mode time limit; `None` keeps the games running until stopped.
     #[serde(default)]
     pub farm_duration_secs: Option<u64>,
+    /// Quest mode: exactly these games run for `quest_duration_secs`, so a
+    /// Discord quest for a specific game can be completed on schedule.
+    #[serde(default)]
+    pub quest_mode: bool,
+    /// Games picked for the current quest run (native processes only).
+    #[serde(default)]
+    pub quest_game_ids: Vec<String>,
+    /// Quest run length; `None` falls back to the 15 minute default.
+    #[serde(default)]
+    pub quest_duration_secs: Option<u64>,
     /// Leaves out 18+ games (Discord "Erotic" theme or ESRB Adults Only).
     #[serde(default)]
     pub exclude_adult: bool,

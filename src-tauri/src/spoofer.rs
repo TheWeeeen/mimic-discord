@@ -6,7 +6,7 @@ use crate::state::{
     ActiveGameInfo, SpooferConfig, SpooferLogEvent, SpooferStatus, SpooferStatusEvent,
     SpooferTickEvent, SpoofMode,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -22,6 +22,14 @@ static DUMMY_EXE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dummy.
 static DUMMY_EXE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dummy"));
 
 const MAX_FARM_GAMES: usize = 20;
+
+/// Quest mode defaults and bounds (seconds). Discord quests usually ask for
+/// 5–60 minutes of PC playtime, so a quarter of an hour is a safe default.
+const DEFAULT_QUEST_SECS: u64 = 15 * 60;
+const MIN_QUEST_SECS: u64 = 60;
+const MAX_QUEST_SECS: u64 = 24 * 60 * 60;
+/// How many times a single quest dummy may be respawned if it exits early.
+const MAX_QUEST_RESTARTS: u32 = 5;
 
 /// Log lines carry no timestamp: the UI stamps them with the PC's local time on arrival.
 pub(crate) fn log_event(app: &AppHandle, level: &str, message: &str) {
@@ -124,15 +132,50 @@ unsafe impl Send for JobObjectGuard {}
 #[cfg(windows)]
 unsafe impl Sync for JobObjectGuard {}
 
+/// Launches the dummy binary under the game's own relative path, so the OS
+/// process table (and Discord's process scan) sees the game's executable name.
+fn spawn_dummy_process(exe_path: &Path, game: &SpoofableGame) -> std::io::Result<Child> {
+    let mut cmd = Command::new(exe_path);
+    cmd.arg(&game.name);
+
+    if let Some(args) = &game.arguments {
+        for arg in args.split_whitespace() {
+            cmd.arg(arg);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x00004000);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(1, libc::SIGKILL, 0, 0, 0);
+                Ok(())
+            });
+        }
+    }
+
+    cmd.spawn()
+}
+
 /// Picks the fixed farm set. Games sharing an exe name can't run side by side,
 /// so duplicates are dropped here instead of spilling into a second batch.
 fn select_farm_games(
     app: &AppHandle,
     games: Vec<SpoofableGame>,
     farm_game_ids: &[String],
+    is_quest: bool,
 ) -> Vec<SpoofableGame> {
     let mut exe_basenames: HashSet<String> = HashSet::new();
     let mut selected: Vec<SpoofableGame> = Vec::new();
+    let label_ru = if is_quest { "Квест" } else { "Фарм" };
+    let label_en = if is_quest { "Quest" } else { "Farm" };
 
     for id in farm_game_ids {
         if selected.len() >= MAX_FARM_GAMES {
@@ -151,9 +194,15 @@ fn select_farm_games(
 
                 if !exe_name.is_empty() && !exe_basenames.insert(exe_name.clone()) {
                     let message = if is_russian() {
-                        format!("Фарм: '{}' пропущена, файл {} уже занят другой игрой.", game.name, exe_name)
+                        format!(
+                            "{}: '{}' пропущена, файл {} уже занят другой игрой.",
+                            label_ru, game.name, exe_name
+                        )
                     } else {
-                        format!("Farm: skipped '{}', {} is already used by another game.", game.name, exe_name)
+                        format!(
+                            "{}: skipped '{}', {} is already used by another game.",
+                            label_en, game.name, exe_name
+                        )
                     };
                     log_event(app, "warn", &message);
                     continue;
@@ -177,16 +226,25 @@ pub async fn run_spoofer(
     resume_notify: Arc<Notify>,
     active_pids: Arc<Mutex<Vec<u32>>>,
 ) {
-    let mode_filtered_games: Vec<SpoofableGame> = match config.spoof_mode {
-        SpoofMode::Hybrid => all_games,
-        SpoofMode::ProcessOnly => all_games
+    // Quests are only credited for native game processes, so RPC/console titles
+    // are left out here whatever spoof mode the dashboard is set to.
+    let mode_filtered_games: Vec<SpoofableGame> = if config.quest_mode {
+        all_games
             .into_iter()
             .filter(|g| g.method == SpoofMethod::Process)
-            .collect(),
-        SpoofMode::RpcOnly => all_games
-            .into_iter()
-            .filter(|g| g.method == SpoofMethod::Rpc)
-            .collect(),
+            .collect()
+    } else {
+        match config.spoof_mode {
+            SpoofMode::Hybrid => all_games,
+            SpoofMode::ProcessOnly => all_games
+                .into_iter()
+                .filter(|g| g.method == SpoofMethod::Process)
+                .collect(),
+            SpoofMode::RpcOnly => all_games
+                .into_iter()
+                .filter(|g| g.method == SpoofMethod::Rpc)
+                .collect(),
+        }
     };
 
     let mode_filtered_games: Vec<SpoofableGame> = if config.exclude_adult {
@@ -207,10 +265,37 @@ pub async fn run_spoofer(
         mode_filtered_games
     };
 
-    let is_farm = !config.farm_game_ids.is_empty();
+    if config.quest_mode && config.quest_game_ids.is_empty() {
+        *status_lock.write().await = SpooferStatus::Error;
+        let message = pick(
+            "Квест: не выбрана ни одна игра.",
+            "Quest: no game was selected.",
+        );
+        let _ = app.emit(
+            "spoofer_status",
+            SpooferStatusEvent {
+                status: SpooferStatus::Error,
+                message: Some(message.to_string()),
+            },
+        );
+        log_event(&app, "error", message);
+        return;
+    }
+
+    // A quest run is a fixed set of native games held for a precise time, which
+    // is exactly what Discord checks for "play on PC" quests.
+    let is_quest = config.quest_mode;
+    let is_farm = !is_quest && !config.farm_game_ids.is_empty();
+    let is_hold_run = is_farm || is_quest;
+    let hold_game_ids: &[String] = if is_quest {
+        &config.quest_game_ids
+    } else {
+        &config.farm_game_ids
+    };
+
     let history = load_history();
-    let mut pool: Vec<SpoofableGame> = if is_farm {
-        select_farm_games(&app, mode_filtered_games, &config.farm_game_ids)
+    let mut pool: Vec<SpoofableGame> = if is_hold_run {
+        select_farm_games(&app, mode_filtered_games, hold_game_ids, is_quest)
     } else if config.skip_previously_spoofed {
         let before_count = mode_filtered_games.len();
         let filtered: Vec<SpoofableGame> = mode_filtered_games
@@ -234,35 +319,31 @@ pub async fn run_spoofer(
     let total_available = pool.len();
     if total_available == 0 {
         *status_lock.write().await = SpooferStatus::Finished;
+        let unavailable_message = if is_quest {
+            pick(
+                "Квест: выбранные игры недоступны (нужны только нативные процессы).",
+                "Quest: the selected games are unavailable (native processes only).",
+            )
+        } else if is_farm {
+            pick(
+                "Выбранные для фарма игры недоступны.",
+                "The games selected for farming are unavailable.",
+            )
+        } else {
+            pick(
+                "Все доступные игры уже эмулированы согласно истории!",
+                "All available games are already spoofed according to history!",
+            )
+        };
         let _ = app.emit(
             "spoofer_status",
             SpooferStatusEvent {
                 status: SpooferStatus::Finished,
-                message: Some(
-                    if is_farm {
-                        pick(
-                            "Выбранные для фарма игры недоступны.",
-                            "The games selected for farming are unavailable.",
-                        )
-                    } else {
-                        pick(
-                            "Все доступные игры уже эмулированы согласно истории!",
-                            "All available games are already spoofed according to history!",
-                        )
-                    }
-                    .to_string(),
-                ),
+                message: Some(unavailable_message.to_string()),
             },
         );
-        if is_farm {
-            log_event(
-                &app,
-                "warn",
-                pick(
-                    "Выбранные для фарма игры недоступны.",
-                    "The games selected for farming are unavailable.",
-                ),
-            );
+        if is_hold_run {
+            log_event(&app, "warn", unavailable_message);
         } else {
             log_event(
                 &app,
@@ -276,7 +357,7 @@ pub async fn run_spoofer(
         return;
     }
 
-    let target_count = if is_farm {
+    let target_count = if is_hold_run {
         total_available
     } else {
         config
@@ -285,12 +366,20 @@ pub async fn run_spoofer(
             .unwrap_or(total_available)
     };
 
-    // A farm is a single batch, so it never rotates to other games.
-    let batch_size = if is_farm {
+    // A farm or quest run is a single fixed batch, so it never rotates.
+    let batch_size = if is_hold_run {
         total_available
     } else {
         config.batch_size.clamp(1, 20)
     };
+
+    // Quest time is counted to the minute, because that is what Discord counts.
+    let quest_duration = Duration::from_secs(
+        config
+            .quest_duration_secs
+            .unwrap_or(DEFAULT_QUEST_SECS)
+            .clamp(MIN_QUEST_SECS, MAX_QUEST_SECS),
+    );
 
     // Initialize Win32 Job Object sandbox for orphan process protection
     #[cfg(windows)]
@@ -363,7 +452,20 @@ pub async fn run_spoofer(
         SpoofMode::RpcOnly => pick("Остальные (Discord IPC/RPC)", "Other (Discord IPC/RPC)"),
     };
 
-    let start_message = if is_farm {
+    let start_message = if is_quest {
+        let minutes = quest_duration.as_secs() / 60;
+        if is_russian() {
+            format!(
+                "Квест запущен: {} игр на {} мин. Держите mimic и Discord открытыми — таймер идёт в реальном времени.",
+                target_count, minutes
+            )
+        } else {
+            format!(
+                "Quest started: {} games for {} min. Keep mimic and Discord open — the timer runs in real time.",
+                target_count, minutes
+            )
+        }
+    } else if is_farm {
         if is_russian() {
             format!("Старт фарма: {} игр без смены.", target_count)
         } else {
@@ -543,33 +645,7 @@ pub async fn run_spoofer(
                     let _ = fs::set_permissions(&target_exe_path, fs::Permissions::from_mode(0o755));
                 }
 
-                let mut cmd = Command::new(&target_exe_path);
-                cmd.arg(&game.name);
-
-                if let Some(args) = &game.arguments {
-                    for arg in args.split_whitespace() {
-                        cmd.arg(arg);
-                    }
-                }
-
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    cmd.creation_flags(0x00004000);
-                }
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    unsafe {
-                        cmd.pre_exec(|| {
-                            libc::prctl(1, libc::SIGKILL, 0, 0, 0);
-                            Ok(())
-                        });
-                    }
-                }
-
-                match cmd.spawn() {
+                match spawn_dummy_process(&target_exe_path, game) {
                     Ok(child) => {
                         let pid = child.id();
                         succeeded_count += 1;
@@ -652,7 +728,9 @@ pub async fn run_spoofer(
         } else {
             config.hold_duration_secs
         };
-        let hold_duration = if is_farm {
+        let hold_duration = if is_quest {
+            Some(quest_duration)
+        } else if is_farm {
             config.farm_duration_secs.map(Duration::from_secs)
         } else {
             Some(Duration::from_secs(hold_secs.clamp(3, 3600)))
@@ -717,30 +795,116 @@ pub async fn run_spoofer(
 
         // Hold processes and RPC sessions for the duration
         let mut hold_start = Instant::now();
-        let mut last_farm_tick = Instant::now();
+        let mut last_live_tick = Instant::now();
+        let mut quest_restarts: HashMap<String, u32> = HashMap::new();
         while hold_duration.map_or(true, |limit| hold_start.elapsed() < limit) {
             if cancel_flag.load(Ordering::SeqCst) {
                 break;
             }
 
-            // A farm can run for hours: keep the timer live and report games that died.
-            if is_farm && last_farm_tick.elapsed() >= Duration::from_secs(1) {
-                last_farm_tick = Instant::now();
+            // Farm and quest runs can last hours: keep the timer live and keep the
+            // dummies alive. A quest dummy that exits early is respawned, because a
+            // dead process silently stops that quest's progress.
+            if is_hold_run && last_live_tick.elapsed() >= Duration::from_secs(1) {
+                last_live_tick = Instant::now();
 
-                spawned_processes.retain_mut(|(child, game, _)| {
+                let mut dead_indices: Vec<usize> = Vec::new();
+                for (idx, (child, _, _)) in spawned_processes.iter_mut().enumerate() {
                     if matches!(child.try_wait(), Ok(Some(_))) {
-                        let message = if is_russian() {
-                            format!("Фарм: процесс '{}' завершился, часы по этой игре не идут.", game.name)
-                        } else {
-                            format!("Farm: the process for '{}' exited, this game is no longer counted.", game.name)
-                        };
-                        log_event(&app, "warn", &message);
-                        active_batch_info.retain(|info| info.id != game.id);
-                        false
-                    } else {
-                        true
+                        dead_indices.push(idx);
                     }
-                });
+                }
+
+                for idx in dead_indices.into_iter().rev() {
+                    let (mut child, game, exe_path) = spawned_processes.remove(idx);
+                    let dead_pid = child.id();
+                    let _ = child.wait();
+
+                    {
+                        let mut pids_guard = active_pids.lock().await;
+                        pids_guard.retain(|pid| *pid != dead_pid);
+                    }
+
+                    let restarts = quest_restarts.entry(game.id.clone()).or_insert(0);
+                    if is_quest && *restarts < MAX_QUEST_RESTARTS {
+                        *restarts += 1;
+                        let attempt = *restarts;
+
+                        match spawn_dummy_process(&exe_path, &game) {
+                            Ok(new_child) => {
+                                let new_pid = new_child.id();
+
+                                #[cfg(windows)]
+                                if let Some(guard) = &job_guard {
+                                    guard.assign_pid(new_pid);
+                                }
+
+                                {
+                                    let mut pids_guard = active_pids.lock().await;
+                                    pids_guard.push(new_pid);
+                                }
+
+                                if let Some(info) =
+                                    active_batch_info.iter_mut().find(|i| i.id == game.id)
+                                {
+                                    info.pid = Some(new_pid);
+                                }
+                                spawned_processes.push((new_child, game.clone(), exe_path));
+
+                                let message = if is_russian() {
+                                    format!(
+                                        "Квест: процесс '{}' завершился, перезапуск {}/{}.",
+                                        game.name, attempt, MAX_QUEST_RESTARTS
+                                    )
+                                } else {
+                                    format!(
+                                        "Quest: the process for '{}' exited, restarting it ({}/{}).",
+                                        game.name, attempt, MAX_QUEST_RESTARTS
+                                    )
+                                };
+                                log_event(&app, "warn", &message);
+                            }
+                            Err(e) => {
+                                active_batch_info.retain(|info| info.id != game.id);
+                                let message = if is_russian() {
+                                    format!(
+                                        "Квест: не удалось перезапустить '{}': {}",
+                                        game.name, e
+                                    )
+                                } else {
+                                    format!("Quest: failed to restart '{}': {}", game.name, e)
+                                };
+                                log_event(&app, "error", &message);
+                            }
+                        }
+                    } else {
+                        let message = if is_quest {
+                            if is_russian() {
+                                format!(
+                                    "Квест: '{}' больше не перезапускается, прогресс по игре остановлен.",
+                                    game.name
+                                )
+                            } else {
+                                format!(
+                                    "Quest: '{}' hit the restart limit, progress for this game is stopped.",
+                                    game.name
+                                )
+                            }
+                        } else if is_russian() {
+                            format!(
+                                "Фарм: процесс '{}' завершился, часы по этой игре не идут.",
+                                game.name
+                            )
+                        } else {
+                            format!(
+                                "Farm: the process for '{}' exited, this game is no longer counted.",
+                                game.name
+                            )
+                        };
+                        log_event(&app, if is_quest { "error" } else { "warn" }, &message);
+                        active_batch_info.retain(|info| info.id != game.id);
+                    }
+                }
 
                 let held = hold_start.elapsed();
                 let _ = app.emit(
@@ -825,7 +989,7 @@ pub async fn run_spoofer(
         }
 
         // Record completed batch in persistent history (farm games stay available for normal runs)
-        if !is_farm && !cancel_flag.load(Ordering::SeqCst) {
+        if !is_hold_run && !cancel_flag.load(Ordering::SeqCst) {
             // Games that failed to start are left out so they are retried next time
             let batch_ids: Vec<String> = active_batch_info.iter().map(|g| g.id.clone()).collect();
             record_played_batch(&batch_ids);
@@ -895,7 +1059,32 @@ pub async fn run_spoofer(
     );
 
     let total_elapsed = start_time.elapsed().as_secs();
-    if is_farm {
+    if is_quest {
+        let completed = final_status == SpooferStatus::Finished;
+        let minutes = total_elapsed / 60;
+        let seconds = total_elapsed % 60;
+        let message = if completed {
+            if is_russian() {
+                format!(
+                    "Квест отработан: {} игр, {} мин {} сек. Откройте Discord → «Квесты» и проверьте прогресс: он обновляется с задержкой.",
+                    processed_count, minutes, seconds
+                )
+            } else {
+                format!(
+                    "Quest run finished: {} games, {} min {} sec. Open Discord → Quests and check the progress: it updates with a delay.",
+                    processed_count, minutes, seconds
+                )
+            }
+        } else if is_russian() {
+            format!("Квест остановлен: {} игр, {} сек.", processed_count, total_elapsed)
+        } else {
+            format!(
+                "Quest run stopped: {} games, {} sec.",
+                processed_count, total_elapsed
+            )
+        };
+        log_event(&app, if completed { "success" } else { "info" }, &message);
+    } else if is_farm {
         let message = if is_russian() {
             format!("Фарм завершён: {} игр, {} сек.", processed_count, total_elapsed)
         } else {
@@ -928,5 +1117,68 @@ pub async fn run_spoofer(
             )
         };
         log_event(&app, "info", &message);
+    }
+}
+
+#[cfg(test)]
+mod quest_mode_tests {
+    use super::*;
+
+    fn test_game(name: &str) -> SpoofableGame {
+        SpoofableGame {
+            id: "quest-test".to_string(),
+            name: name.to_string(),
+            rel_path: Some("QuestTest/QuestTest.exe".to_string()),
+            arguments: None,
+            icon_hash: None,
+            method: SpoofMethod::Process,
+            adult: false,
+        }
+    }
+
+    /// The whole quest timer rests on this: the dummy has to start, stay alive for
+    /// the whole window and be killable through the pid the caller tracks.
+    #[test]
+    fn dummy_process_survives_and_can_be_killed() {
+        let dir = std::env::temp_dir().join("mimic_quest_test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("QuestTest")).unwrap();
+        let exe_path = dir.join("QuestTest").join("QuestTest.exe");
+
+        let base = Path::new(env!("OUT_DIR")).join("dummy");
+        if fs::hard_link(&base, &exe_path).is_err() {
+            fs::copy(&base, &exe_path).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&exe_path, fs::Permissions::from_mode(0o755));
+        }
+
+        let game = test_game("QuestTest");
+        let mut child = spawn_dummy_process(&exe_path, &game).expect("dummy should start");
+
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "the dummy exited before the quest timer could count it"
+        );
+
+        #[cfg(unix)]
+        {
+            let comm =
+                fs::read_to_string(format!("/proc/{}/comm", child.id())).unwrap_or_default();
+            // The dummy renames itself to the game name, which is what Discord
+            // reads when it looks for a running quest game.
+            assert_eq!(
+                comm.trim(),
+                "QuestTest",
+                "the process name has to match the game name"
+            );
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_dir_all(&dir);
     }
 }

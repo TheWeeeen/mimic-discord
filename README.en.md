@@ -37,6 +37,7 @@
 
 - **🏆 Game Variety Badge Booster**: Rapidly cycles through verified Discord titles in parallel batches (e.g. 8 games with 15s hold). Tested and proven to unlock the Mythic **Универсал** badge (9,800+ games).
 - **⏱️ Game Time Multiplier**: Running multiple games concurrently multiplies your Discord gameplay tracking hours (e.g. 8 games × 5 hours = 40 hours credited).
+- **🎯 Discord quests**: the **Quests** tab holds one chosen game for exactly the time a quest asks for — pick 5/10/15/30/60 minutes or any custom value, leave it running, and mimic keeps the process alive (it restarts it if it dies).
 - **🐧 Multiplatform Support**: Runs natively on both **Windows** (Win32 dummy process window emulation) and **Linux** (`prctl`/`/proc/self/comm` emulation). Note: Discord's database is heavily Windows-oriented — on Linux only **8** games have a native executable, see [Known Limitations](#limitations).
 - **🛡️ 100% Safe & Native**: Zero token extraction, zero memory injection, zero Discord client modifications. Discord naturally detects running games via official OS process inspection APIs.
 - **⚡ Background Process Emulation**: Lightweight dummy engine creating legitimate application processes without stealing focus or interrupting your work.
@@ -59,6 +60,14 @@ Discord tracks two badges for desktop gamers:
    - Tracks total playtime hours.
    - Running parallel dummy processes multiplies tracked hours (e.g. 8x boost).
    - Use the **Hour farm** tab: pick up to 20 games and they keep running without rotating until you stop them or the timer ends.
+
+3. **Discord Quests** ("Play a game for N minutes"):
+   - Open the **Quests** tab, find the game the quest asks for and add it to the set.
+   - Pick a preset (5/10/15/30/60 min) or type your own — from 1 minute to 12 hours.
+   - Hit **Start quest** and keep mimic and Discord open: the timer runs in real time and the processes close when it ends.
+   - Only native games count for quests — RPC/console titles are never credited, so they are not listed here.
+   - If a game process exits early, mimic restarts it (up to 5 times) and says so in the console.
+   - Quest progress in Discord updates with a delay — open **Discord → Quests** a few minutes after the run.
 
 ---
 

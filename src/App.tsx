@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Sidebar, type ActiveTab } from '@/components/Sidebar';
 import { DashboardView } from '@/components/DashboardView';
 import { FarmView } from '@/components/FarmView';
+import { QuestView } from '@/components/QuestView';
 import { DatabaseView } from '@/components/DatabaseView';
 import { ConsoleView } from '@/components/ConsoleView';
 import { SettingsView } from '@/components/SettingsView';
@@ -24,6 +25,7 @@ function readExcludeAdult(): boolean {
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [isFarmRun, setIsFarmRun] = useState(false);
+  const [isQuestRun, setIsQuestRun] = useState(false);
   const [config, setConfig] = useState<SpooferConfig>(() => ({
     limit: null,
     batch_size: 8,
@@ -87,15 +89,32 @@ export const App: React.FC = () => {
 
   const handleStart = () => {
     setIsFarmRun(false);
+    setIsQuestRun(false);
     actions.start(effectiveConfig);
   };
 
   const handleStartFarm = (gameIds: string[], durationSecs: number | null) => {
     setIsFarmRun(true);
+    setIsQuestRun(false);
     actions.start({
       ...effectiveConfig,
       farm_game_ids: gameIds,
       farm_duration_secs: durationSecs,
+    });
+  };
+
+  // Quest mode: hold exactly these games for a fixed time, so a Discord quest
+  // that asks for one specific game can be completed on schedule.
+  const handleStartQuest = (gameIds: string[], durationSecs: number) => {
+    setIsFarmRun(false);
+    setIsQuestRun(true);
+    actions.start({
+      ...effectiveConfig,
+      quest_mode: true,
+      quest_game_ids: gameIds,
+      quest_duration_secs: durationSecs,
+      farm_game_ids: [],
+      farm_duration_secs: null,
     });
   };
 
@@ -147,6 +166,18 @@ export const App: React.FC = () => {
               excludeAdult={Boolean(config.exclude_adult)}
               isFetching={isFetchingDatabase}
               onStart={handleStartFarm}
+              onStop={actions.stop}
+            />
+          )}
+
+          {activeTab === 'quest' && (
+            <QuestView
+              status={status}
+              tickData={tickData}
+              isQuestRun={isQuestRun}
+              excludeAdult={Boolean(config.exclude_adult)}
+              isFetching={isFetchingDatabase}
+              onStart={handleStartQuest}
               onStop={actions.stop}
             />
           )}

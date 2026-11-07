@@ -95,6 +95,12 @@ export interface SpooferConfig {
   farm_game_ids?: string[];
   /** Farm time limit; null keeps the games running until stopped. */
   farm_duration_secs?: number | null;
+  /** Quest mode: hold exactly these games for quest_duration_secs. */
+  quest_mode?: boolean;
+  /** Games picked for this quest run (native processes only). */
+  quest_game_ids?: string[];
+  /** Quest run length; null falls back to the 15 minute default. */
+  quest_duration_secs?: number | null;
   /** Leave out 18+ games. */
   exclude_adult?: boolean;
 }
