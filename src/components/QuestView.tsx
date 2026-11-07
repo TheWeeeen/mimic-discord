@@ -9,6 +9,9 @@ const MAX_QUEST_GAMES = 20;
 const MAX_SEARCH_RESULTS = 100;
 const DEFAULT_MINUTES = 15;
 const MIN_MINUTES = 1;
+// Mirrors QUEST_BUFFER_SECS in spoofer.rs: the backend holds the games this long
+// past the requested time so Discord has time to credit the quest.
+const QUEST_BUFFER_SECS = 30;
 const MAX_MINUTES = 720;
 
 const QUEST_GAMES_STORAGE_KEY = 'mimic.quest_game_ids';
@@ -166,6 +169,7 @@ export const QuestView: React.FC<QuestViewProps> = ({
   const totalSecs = minutes * 60;
   const elapsed = Math.min(tickData.elapsed_secs, totalSecs);
   const remaining = Math.max(totalSecs - tickData.elapsed_secs, 0);
+  const bufferLeft = Math.max(totalSecs + QUEST_BUFFER_SECS - tickData.elapsed_secs, 0);
   const progress = totalSecs > 0 ? Math.min((elapsed / totalSecs) * 100, 100) : 0;
 
   const commitMinutes = (value: string) => {
@@ -223,10 +227,16 @@ export const QuestView: React.FC<QuestViewProps> = ({
 
           {isRunning ? (
             <div className="flex items-center gap-3">
-              <div className="text-xs text-neutral-400 whitespace-nowrap">
-                {t('quest.left')}{' '}
-                <span className="font-mono font-bold text-emerald-400">{formatClock(remaining)}</span>
-              </div>
+              {remaining > 0 ? (
+                <div className="text-xs text-neutral-400 whitespace-nowrap">
+                  {t('quest.left')}{' '}
+                  <span className="font-mono font-bold text-emerald-400">{formatClock(remaining)}</span>
+                </div>
+              ) : (
+                <div className="text-xs text-amber-400/90 max-w-[320px] leading-snug">
+                  {t('quest.buffer', { secs: bufferLeft })}
+                </div>
+              )}
               <button
                 type="button"
                 onClick={onStop}

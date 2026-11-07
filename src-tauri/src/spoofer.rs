@@ -28,6 +28,10 @@ const MAX_FARM_GAMES: usize = 20;
 const DEFAULT_QUEST_SECS: u64 = 15 * 60;
 const MIN_QUEST_SECS: u64 = 60;
 const MAX_QUEST_SECS: u64 = 24 * 60 * 60;
+/// Discord credits a quest with a delay, so a run that stops exactly on the
+/// requested second can be scored as "not played long enough". Every quest run
+/// keeps the processes alive this long past the requested time.
+const QUEST_BUFFER_SECS: u64 = 30;
 /// How many times a single quest dummy may be respawned if it exits early.
 const MAX_QUEST_RESTARTS: u32 = 5;
 
@@ -380,6 +384,9 @@ pub async fn run_spoofer(
             .unwrap_or(DEFAULT_QUEST_SECS)
             .clamp(MIN_QUEST_SECS, MAX_QUEST_SECS),
     );
+    // Processes stay up past the requested time, so the quest still counts when
+    // Discord gets around to checking it.
+    let quest_hold = quest_duration + Duration::from_secs(QUEST_BUFFER_SECS);
 
     // Initialize Win32 Job Object sandbox for orphan process protection
     #[cfg(windows)]
@@ -456,13 +463,13 @@ pub async fn run_spoofer(
         let minutes = quest_duration.as_secs() / 60;
         if is_russian() {
             format!(
-                "Квест запущен: {} игр на {} мин. Держите mimic и Discord открытыми — таймер идёт в реальном времени.",
-                target_count, minutes
+                "Квест запущен: {} игр на {} мин (+{} с запас на задержку Discord). Держите mimic и Discord открытыми — таймер идёт в реальном времени.",
+                target_count, minutes, QUEST_BUFFER_SECS
             )
         } else {
             format!(
-                "Quest started: {} games for {} min. Keep mimic and Discord open — the timer runs in real time.",
-                target_count, minutes
+                "Quest started: {} games for {} min (+{} s buffer for Discord's delay). Keep mimic and Discord open — the timer runs in real time.",
+                target_count, minutes, QUEST_BUFFER_SECS
             )
         }
     } else if is_farm {
@@ -729,7 +736,7 @@ pub async fn run_spoofer(
             config.hold_duration_secs
         };
         let hold_duration = if is_quest {
-            Some(quest_duration)
+            Some(quest_hold)
         } else if is_farm {
             config.farm_duration_secs.map(Duration::from_secs)
         } else {

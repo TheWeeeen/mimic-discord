@@ -99,6 +99,7 @@ const en = {
   'quest.start': 'Start quest',
   'quest.stop': 'Stop quest',
   'quest.left': 'left:',
+  'quest.buffer': '+{secs} s buffer: Discord credits the quest a bit later, so the games stay up until then.',
   'quest.running': 'Quest is running. Keep mimic and Discord open — the timer is real time.',
   'quest.busy': 'Another run is active. Stop it on the dashboard to start the quest.',
   'quest.selected': 'Quest games',
@@ -106,7 +107,7 @@ const en = {
   'quest.searchHint': 'Search {count} games by name, ID or .exe',
   'quest.add': 'Add to quest',
   'quest.remove': 'Remove from quest',
-  'quest.hint': 'Only native games count for quests, so RPC and console titles are not listed. If a game process dies, mimic restarts it automatically.',
+  'quest.hint': 'Only native games count for quests, so RPC and console titles are not listed. If a game process dies, mimic restarts it automatically. Each run holds 30 s past the set time so Discord has time to credit it.',
   'quest.doneTitle': 'Quest time is up',
   'quest.doneBody': 'Open Discord → Quests and check the progress. It can take a few minutes to update.',
 
@@ -302,6 +303,7 @@ const ru: Record<MessageKey, string> = {
   'quest.start': 'Запустить квест',
   'quest.stop': 'Остановить квест',
   'quest.left': 'осталось:',
+  'quest.buffer': 'запас +{secs} с: Discord засчитывает квест с задержкой, поэтому игры держим до конца.',
   'quest.running': 'Квест идёт. Держите mimic и Discord открытыми — таймер в реальном времени.',
   'quest.busy': 'Уже идёт другой запуск. Остановите его на дашборде, чтобы запустить квест.',
   'quest.selected': 'Игры для квеста',
@@ -309,7 +311,7 @@ const ru: Record<MessageKey, string> = {
   'quest.searchHint': 'Поиск среди {count} игр по названию, ID или .exe',
   'quest.add': 'Добавить в квест',
   'quest.remove': 'Убрать из квеста',
-  'quest.hint': 'В квесты идут только нативные игры, поэтому RPC и консольные сюда не попадают. Если процесс игры упадёт, mimic перезапустит его сам.',
+  'quest.hint': 'В квесты идут только нативные игры, поэтому RPC и консольные сюда не попадают. Если процесс игры упадёт, mimic перезапустит его сам. Каждый запуск держится на 30 с дольше заданного времени, чтобы Discord успел засчитать квест.',
   'quest.doneTitle': 'Время квеста вышло',
   'quest.doneBody': 'Откройте Discord → «Квесты» и проверьте прогресс. Обновление занимает пару минут.',
 
