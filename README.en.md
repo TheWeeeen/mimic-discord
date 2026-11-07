@@ -37,6 +37,7 @@
 
 - **🏆 Game Variety Badge Booster**: Rapidly cycles through verified Discord titles in parallel batches (e.g. 8 games with 15s hold). Tested and proven to unlock the Mythic **Универсал** badge (9,800+ games).
 - **⏱️ Game Time Multiplier**: Running multiple games concurrently multiplies your Discord gameplay tracking hours (e.g. 8 games × 5 hours = 40 hours credited).
+- **📊 Taskbar progress**: while a run is going, the app button in the Windows taskbar fills up like a browser download; when it ends you get a Windows toast, and a minimised window flashes its icon.
 - **🎯 Discord quests**: the **Quests** tab holds one chosen game for exactly the time a quest asks for — pick 5/10/15/30/60 minutes or any custom value, leave it running, and mimic keeps the process alive (it restarts it if it dies).
 - **🐧 Multiplatform Support**: Runs natively on both **Windows** (Win32 dummy process window emulation) and **Linux** (`prctl`/`/proc/self/comm` emulation). Note: Discord's database is heavily Windows-oriented — on Linux only **8** games have a native executable, see [Known Limitations](#limitations).
 - **🛡️ 100% Safe & Native**: Zero token extraction, zero memory injection, zero Discord client modifications. Discord naturally detects running games via official OS process inspection APIs.

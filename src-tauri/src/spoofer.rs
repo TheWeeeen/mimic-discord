@@ -13,7 +13,8 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::window::{ProgressBarState, ProgressBarStatus};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 #[cfg(windows)]
@@ -44,6 +45,47 @@ pub(crate) fn log_event(app: &AppHandle, level: &str, message: &str) {
             message: message.to_string(),
         },
     );
+}
+
+/// Mirrors a run onto the taskbar button, the way a browser paints a download:
+/// a filling bar for the whole run, red on failure, cleared when it is over.
+/// `progress` is a percentage from 0 to 100.
+fn set_taskbar_progress(app: &AppHandle, status: ProgressBarStatus, progress: Option<u64>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_progress_bar(ProgressBarState {
+            status: Some(status),
+            progress,
+        });
+    }
+}
+
+/// Percentage of the run that is behind us, clamped to 0..=100 so the bar
+/// never overshoots when a hold runs past its limit.
+fn progress_percent(elapsed: Duration, limit: Duration) -> u64 {
+    if limit.as_secs() == 0 {
+        return 100;
+    }
+    ((elapsed.as_secs_f64() / limit.as_secs_f64()) * 100.0).clamp(0.0, 100.0) as u64
+}
+
+fn clear_taskbar_progress(app: &AppHandle) {
+    set_taskbar_progress(app, ProgressBarStatus::None, None);
+}
+
+/// Desktop toast, so the result still reaches the user when the window sits in
+/// the background or is minimised.
+fn notify_run_finished(app: &AppHandle, title: &str, body: &str) {
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        log_event(app, "warn", &format!("Notification failed: {e}"));
+    }
+    // With the window minimised the toast can be missed: blink the taskbar
+    // button as well, like a browser does when a download wraps up.
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_focused().unwrap_or(true) {
+            let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+        }
+    }
 }
 
 fn cleanup_temp_dir(temp_dir: &Path) {
@@ -271,6 +313,7 @@ pub async fn run_spoofer(
 
     if config.quest_mode && config.quest_game_ids.is_empty() {
         *status_lock.write().await = SpooferStatus::Error;
+        set_taskbar_progress(&app, ProgressBarStatus::Error, Some(100));
         let message = pick(
             "Квест: не выбрана ни одна игра.",
             "Quest: no game was selected.",
@@ -398,6 +441,7 @@ pub async fn run_spoofer(
 
     if let Err(e) = fs::create_dir_all(&temp_root) {
         *status_lock.write().await = SpooferStatus::Error;
+        set_taskbar_progress(&app, ProgressBarStatus::Error, Some(100));
         let err_msg = if is_russian() {
             format!("Ошибка создания временной папки: {}", e)
         } else {
@@ -421,6 +465,7 @@ pub async fn run_spoofer(
 
     if let Err(e) = fs::write(&base_dummy_path, DUMMY_EXE_BYTES) {
         *status_lock.write().await = SpooferStatus::Error;
+        set_taskbar_progress(&app, ProgressBarStatus::Error, Some(100));
         let err_msg = if is_russian() {
             format!("Не удалось создать базовый бинарный файл: {}", e)
         } else {
@@ -548,6 +593,7 @@ pub async fn run_spoofer(
         // Check pause
         if pause_flag.load(Ordering::SeqCst) {
             *status_lock.write().await = SpooferStatus::Paused;
+            set_taskbar_progress(&app, ProgressBarStatus::Paused, None);
             let _ = app.emit(
                 "spoofer_status",
                 SpooferStatusEvent {
@@ -772,6 +818,21 @@ pub async fn run_spoofer(
             },
         );
 
+        let batch_pct = if target_count > 0 {
+            Some(((processed_count.min(target_count) as f64 / target_count as f64) * 100.0) as u64)
+        } else {
+            None
+        };
+        set_taskbar_progress(
+            &app,
+            if batch_pct.is_some() {
+                ProgressBarStatus::Normal
+            } else {
+                ProgressBarStatus::Indeterminate
+            },
+            batch_pct,
+        );
+
         let batch_titles: Vec<String> = current_batch
             .iter()
             .map(|g| {
@@ -914,6 +975,16 @@ pub async fn run_spoofer(
                 }
 
                 let held = hold_start.elapsed();
+                let held_pct = hold_duration.map(|limit| progress_percent(held, limit));
+                set_taskbar_progress(
+                    &app,
+                    if held_pct.is_some() {
+                        ProgressBarStatus::Normal
+                    } else {
+                        ProgressBarStatus::Indeterminate
+                    },
+                    held_pct,
+                );
                 let _ = app.emit(
                     "spoofer_tick",
                     SpooferTickEvent {
@@ -932,6 +1003,7 @@ pub async fn run_spoofer(
 
             if pause_flag.load(Ordering::SeqCst) {
                 *status_lock.write().await = SpooferStatus::Paused;
+                set_taskbar_progress(&app, ProgressBarStatus::Paused, None);
                 let _ = app.emit(
                     "spoofer_status",
                     SpooferStatusEvent {
@@ -1125,11 +1197,59 @@ pub async fn run_spoofer(
         };
         log_event(&app, "info", &message);
     }
+
+    clear_taskbar_progress(&app);
+
+    if final_status == SpooferStatus::Finished {
+        let title = if is_quest {
+            pick("mimic: квест завершён", "mimic: quest finished")
+        } else if is_farm {
+            pick("mimic: фарм завершён", "mimic: farm finished")
+        } else {
+            pick("mimic: запуск завершён", "mimic: run finished")
+        };
+        let body = if is_quest {
+            if is_russian() {
+                format!(
+                    "{} игр за {} мин. Проверьте Discord → «Квесты».",
+                    processed_count,
+                    total_elapsed / 60
+                )
+            } else {
+                format!(
+                    "{} games in {} min. Check Discord → Quests.",
+                    processed_count,
+                    total_elapsed / 60
+                )
+            }
+        } else if is_farm {
+            if is_russian() {
+                format!("Фарм завершён: {} игр.", processed_count)
+            } else {
+                format!("Farm finished: {} games.", processed_count)
+            }
+        } else if is_russian() {
+            format!("Эмуляция завершена: {} игр.", processed_count)
+        } else {
+            format!("Run finished: {} games.", processed_count)
+        };
+        notify_run_finished(&app, title, &body);
+    }
 }
 
 #[cfg(test)]
 mod quest_mode_tests {
     use super::*;
+
+    #[test]
+    fn taskbar_progress_follows_the_hold() {
+        let limit = Duration::from_secs(900);
+        assert_eq!(progress_percent(Duration::ZERO, limit), 0);
+        assert_eq!(progress_percent(Duration::from_secs(450), limit), 50);
+        // The 30 s buffer runs past the limit: the bar must stay full, not wrap.
+        assert_eq!(progress_percent(Duration::from_secs(905), limit), 100);
+        assert_eq!(progress_percent(Duration::from_secs(5), Duration::ZERO), 100);
+    }
 
     fn test_game(name: &str) -> SpoofableGame {
         SpoofableGame {

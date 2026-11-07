@@ -85,7 +85,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Footer Info */}
       <div className="px-2 text-[11px] text-neutral-500 font-mono border-t border-white/5 pt-3">
-        v1.4.1 • mimic-discord
+        v1.4.2 • mimic-discord
       </div>
     </aside>
   );
